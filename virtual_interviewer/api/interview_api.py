@@ -2,11 +2,19 @@
 面試 API 端點（簡化版）
 """
 
+from fast_agent_bridge import (
+    analyze_answer,
+    analyze_intro,
+    clear_collected_intro,
+    get_collected_intro,
+    get_question,
+    intro_collector,
+)
 from flask import request
 from flask_restful import Resource
 
 from models import InterviewSession, db
-from services.state_manager import InterviewStateManager
+from services.state_manager import InterviewState, InterviewStateManager
 from utils.response_helpers import create_error_response, create_success_response
 
 
@@ -27,12 +35,17 @@ class InterviewAPI(Resource):
             # 檢查狀態轉換
             state_changed = self.state_manager.transition_state(user_id, user_message)
             if state_changed:
+                # 狀態轉換後，重新獲取最新狀態
                 current_state = self.state_manager.get_user_state(user_id)
+                print(f"🔄 狀態已轉換，新狀態: {current_state.value}")
 
-            # 根據狀態處理訊息
+            # 根據最新狀態處理訊息
             ai_response = self._process_message_by_state(
                 user_message, current_state, user_id
             )
+
+            # 處理過程中可能更新了狀態（例如分析完成自動進入面試），因此再次獲取當前狀態
+            current_state = self.state_manager.get_user_state(user_id)
 
             # 儲存對話記錄
             session_data = {
@@ -42,9 +55,15 @@ class InterviewAPI(Resource):
                 "timestamp": "2024-01-01T00:00:00",  # 簡化時間戳
             }
 
-            interview_session = InterviewSession(
-                user_id=user_id, session_data=str(session_data)
-            )
+            # 儲存會話（user_id 需為整數，非整數則存 None）
+            interview_session = InterviewSession()
+            try:
+                interview_session.user_id = (
+                    int(user_id) if str(user_id).isdigit() else None
+                )
+            except Exception:
+                interview_session.user_id = None
+            interview_session.session_data = str(session_data)
             db.session.add(interview_session)
             db.session.commit()
 
@@ -88,6 +107,16 @@ class InterviewAPI(Resource):
         ]
 
         if any(keyword in lower_message for keyword in start_keywords):
+            # 重新開始新的面試回合時，清空已收集的自我介紹
+            try:
+                clear_collected_intro("default_user")
+            except Exception:
+                pass
+            # 清空狀態管理器的所有用戶數據，確保全新開始
+            try:
+                self.state_manager.clear_user_data("default_user")
+            except Exception:
+                pass
             return """
 🎯 面試開始！
 
@@ -124,6 +153,43 @@ class InterviewAPI(Resource):
 
     def _process_intro_state(self, user_message, user_id):
         """處理自我介紹階段的訊息"""
+        lower_message = (user_message or "").lower()
+        start_keywords = [
+            "開始面試",
+            "開始",
+            "start_interview",
+            "開始練習",
+            "準備好了",
+            "可以開始了",
+        ]
+        done_phrases = {
+            "介紹完了",
+            "介紹完成",
+            "我說完了",
+            "說完了",
+            "完成介紹",
+            "結束介紹",
+        }
+
+        # 如果剛從等待階段進入自我介紹（收到開始面試相關訊息），給出清晰的自我介紹引導
+        if any(keyword in lower_message for keyword in start_keywords):
+            return """
+🎯 面試開始！
+
+現在進入「自我介紹」階段，請盡量包含以下要素：
+- 開場簡介（身份與專業定位）
+- 學經歷概述  
+- 核心技能與強項
+- 代表成果
+- 與職缺的連結
+- 結語與期待
+
+完成後請輸入：「介紹完了」 以進入分析階段。
+            """
+
+        if user_message in done_phrases:
+            return "已收到您『自我介紹完成』的指示，將進入分析階段。若未自動切換，請再次輸入：「介紹完了」。"
+
         if user_message == "介紹完了":
             return """
 🎯 **自我介紹完成！**
@@ -133,35 +199,116 @@ class InterviewAPI(Resource):
 系統正在分析您的自我介紹內容，請稍候...
             """
         else:
-            return "✅ 已記錄您的自我介紹內容。請繼續介紹，或說「介紹完了」來開始面試。"
+            # 收集自我介紹內容，供後續分析使用
+            try:
+                intro_collector(user_message=user_message, user_id=user_id)
+            except Exception:
+                pass
+            return "✅ 已記錄您的自我介紹內容。請繼續介紹，或說「介紹完了」來開始分析。"
 
     def _process_intro_analysis_state(self, user_message, user_id):
-        """處理自我介紹分析階段"""
-        return """
-📊 **自我介紹分析結果**
+        """處理自我介紹分析階段：實際呼叫分析並回傳結果，並自動切換到面試階段"""
+        # 優先使用已收集的自我介紹內容；若無，退回使用本次訊息
+        collected = ""
+        try:
+            collected = get_collected_intro(user_id)
+        except Exception:
+            collected = ""
 
-您的自我介紹已分析完畢。現在您可以：
-- 說「開始面試」進入面試問答階段
-- 說「重新介紹」重新進行自我介紹
+        content_to_analyze = collected.strip() or (user_message or "").strip()
+        if not content_to_analyze:
+            return "尚未收集到您的自我介紹內容。請先簡要介紹自己，或輸入「重新介紹」重新開始。"
 
-請告訴我您想要如何繼續？
-        """
+        try:
+            result = analyze_intro(user_message=content_to_analyze, user_id=user_id)
+            if isinstance(result, dict) and result.get("success"):
+                # 在分析完成後，自動切換到面試問答階段
+                self.state_manager.set_user_state(user_id, InterviewState.QUESTIONING)
+
+                analysis_text = result.get("result", "📊 自我介紹分析完成。")
+                guidance = (
+                    "\n\n分析完成，將進入面試階段。系統會在 5 秒後提供第一個問題。"
+                )
+                return f"{analysis_text}{guidance}"
+            # 若回傳非常規格式，直接轉為字串，同時切換到面試階段
+            self.state_manager.set_user_state(user_id, InterviewState.QUESTIONING)
+            return str(result)
+        except Exception as e:
+            return f"📊 自我介紹分析出現問題：{str(e)}"
 
     def _process_questioning_state(self, user_message, user_id):
         """處理面試提問階段的訊息"""
-        return f"""
-🎯 **面試問題階段**
+        lower_message = (user_message or "").lower()
 
-您說：「{user_message}」
+        # 取得新題目
+        question_request_keywords = {
+            "請給我問題",
+            "開始問答",
+            "開始面試",
+            "下一題",
+            "下一個問題",
+            "給我問題",
+        }
 
-這是一個很好的回答！我會分析您的回答並給出評分。
+        if any(k in lower_message for k in question_request_keywords):
+            try:
+                result = get_question()
+                if isinstance(result, dict) and result.get("success"):
+                    qdata = result.get("question_data", {})
+                    question_text = qdata.get("question") or ""
+                    standard_answer = qdata.get("standard_answer") or ""
 
-請等待系統準備下一題...
-        """
+                    # 記錄到狀態管理器
+                    self.state_manager.set_user_current_question(
+                        user_id,
+                        question_text,
+                        standard_answer,
+                        question_data=qdata,
+                    )
+
+                    response_text = result.get("result")
+                    if not response_text:
+                        category = qdata.get("category", "一般")
+                        difficulty = qdata.get("difficulty", "中等")
+                        response_text = f"🎯 面試問題\n\n類別：{category}\n難度：{difficulty}\n\n問題：{question_text}\n\n請作答，送出後我會立即分析並給出評分。"
+                    return response_text
+                else:
+                    return "抱歉，目前無法取得面試問題，請稍後再試或輸入『請給我問題』重試。"
+            except Exception as e:
+                return f"取得面試問題失敗：{str(e)}"
+
+        # 分析用戶回答
+        current_q = self.state_manager.get_user_current_question(user_id)
+        if not current_q:
+            return "目前沒有待回答的題目。請先輸入『請給我問題』取得題目。"
+
+        try:
+            analysis = analyze_answer(
+                user_answer=user_message,
+                question=current_q.get("question", ""),
+                standard_answer=current_q.get("standard_answer", ""),
+            )
+            if isinstance(analysis, dict) and analysis.get("success"):
+                return analysis.get("result", "分析完成。")
+            return str(analysis)
+        except Exception as e:
+            return f"回答分析失敗：{str(e)}"
 
     def _process_completed_state(self, user_message, user_id):
         """處理面試完成階段"""
-        return """
+        lower_message = (user_message or "").lower()
+        restart_keywords = ["重新開始", "重新來過", "重新面試", "重來", "restart"]
+
+        if any(k in lower_message for k in restart_keywords):
+            # 重新開始時，清空所有狀態和數據
+            try:
+                clear_collected_intro(user_id)
+                self.state_manager.clear_user_data(user_id)
+            except Exception:
+                pass
+            return "✅ 面試已重置，請點擊「開始面試」按鈕開始新的面試。"
+        else:
+            return """
 ✅ **面試已完成**
 
 您的面試總結已經生成完畢。
@@ -171,4 +318,4 @@ class InterviewAPI(Resource):
 - 查看之前的面試總結
 
 如需重新開始面試，請說「重新開始」。
-        """
+            """

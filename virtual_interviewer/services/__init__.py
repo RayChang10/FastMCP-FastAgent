@@ -3,7 +3,6 @@
 包含所有業務邏輯處理
 """
 
-from .interview_service import InterviewService
 from .state_manager import InterviewStateManager
 
-__all__ = ["InterviewService", "InterviewStateManager"]
+__all__ = ["InterviewStateManager"]

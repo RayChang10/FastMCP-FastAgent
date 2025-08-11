@@ -3,6 +3,6 @@
 包含應用程式配置設定
 """
 
-from config.settings import Config
+from configs.settings import Config
 
 __all__ = ["Config"]

@@ -19,10 +19,13 @@ class InterviewStateManager:
     """面試狀態管理器"""
 
     def __init__(self):
-        # 類級別的靜態變數，確保狀態在請求之間保持
-        self.session_states = {}
-        # 用戶當前問題存儲
-        self.user_current_questions = {}
+        # 使用類別層級共享狀態，避免每次請求被重置
+        # 注意：不要在 __init__ 內重新指派同名實例屬性
+        pass
+
+    # 類別層級共享映射：在所有實例與請求之間共享
+    session_states = {}
+    user_current_questions = {}
 
     def get_user_state(self, user_id):
         """獲取用戶的當前狀態"""
@@ -50,6 +53,14 @@ class InterviewStateManager:
         """獲取用戶當前問題"""
         return self.user_current_questions.get(user_id, None)
 
+    def clear_user_data(self, user_id):
+        """清空用戶的所有狀態數據"""
+        if user_id in self.session_states:
+            del self.session_states[user_id]
+        if user_id in self.user_current_questions:
+            del self.user_current_questions[user_id]
+        print(f"🧹 用戶 {user_id} 的所有狀態數據已清空")
+
     def transition_state(self, user_id, user_message):
         """根據用戶訊息判斷是否需要狀態轉換"""
         lower_message = user_message.lower()
@@ -71,8 +82,16 @@ class InterviewStateManager:
 
         # 從 INTRO 轉換到 INTRO_ANALYSIS（完成自我介紹）
         elif current_state == InterviewState.INTRO:
-            # 只有"介紹完了"四個字一模一樣才能觸發分析階段
-            if user_message == "介紹完了":
+            # 接受多個同義詞
+            done_phrases = {
+                "介紹完了",
+                "介紹完成",
+                "我說完了",
+                "說完了",
+                "完成介紹",
+                "結束介紹",
+            }
+            if user_message in done_phrases:
                 self.set_user_state(user_id, InterviewState.INTRO_ANALYSIS)
                 return True
 

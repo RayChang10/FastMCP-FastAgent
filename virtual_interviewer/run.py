@@ -16,6 +16,11 @@ def setup_python_path():
         # 獲取父目錄（項目根目錄）
         parent_dir = os.path.dirname(current_dir)
 
+        # 將當前目錄添加到 Python 路徑（強制添加）
+        if current_dir not in sys.path:
+            sys.path.insert(0, current_dir)
+        print(f"✅ 當前目錄已在 Python 路徑中: {current_dir}")
+
         # 將父目錄添加到 Python 路徑
         if parent_dir not in sys.path:
             sys.path.insert(0, parent_dir)
