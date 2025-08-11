@@ -202,6 +202,49 @@ def clear_collected_intro(user_id: str = "default_user"):
     """清除已收集的自我介紹內容"""
     if user_id in _user_intro_content:
         _user_intro_content[user_id] = []
+        print(f"🧹 已清除用戶 {user_id} 的自我介紹內容")
+    return {
+        "success": True,
+        "result": f"✅ 已清除用戶 {user_id} 的自我介紹內容",
+        "message": "自我介紹內容已成功清除",
+    }
+
+
+def clear_all_user_data(user_id: str = "default_user"):
+    """清除用戶的所有相關數據"""
+    print(f"🧹 開始清除用戶 {user_id} 的所有相關數據...")
+
+    try:
+        # 清除自我介紹內容
+        if user_id in _user_intro_content:
+            old_content = _user_intro_content[user_id]
+            del _user_intro_content[user_id]
+            print(
+                f"   ✅ 已清除用戶 {user_id} 的自我介紹內容 ({len(old_content)} 條記錄)"
+            )
+        else:
+            print(f"   ℹ️ 用戶 {user_id} 沒有自我介紹內容")
+
+        # 清除其他可能的全局狀態（如果有其他模組的狀態需要清除）
+        # 這裡可以添加清除其他模組狀態的邏輯
+
+        # 檢查是否還有其他相關的全局變數需要清除
+        remaining_users = list(_user_intro_content.keys())
+        if remaining_users:
+            print(f"   ℹ️ 其他用戶的數據仍然存在: {remaining_users}")
+        else:
+            print(f"   ✅ 所有用戶數據已完全清除")
+
+        print(f"🧹 用戶 {user_id} 的所有相關數據清除完成")
+
+        return {
+            "success": True,
+            "result": f"✅ 已清除用戶 {user_id} 的所有相關數據",
+            "message": "用戶數據已完全清除",
+        }
+    except Exception as e:
+        print(f"❌ 清除用戶數據失敗: {str(e)}")
+        return {"success": False, "error": f"清除用戶數據失敗: {str(e)}"}
 
 
 def analyze_answer(
@@ -1286,6 +1329,12 @@ def call_fast_agent_function(function_name, **kwargs):
                 return {"success": True, "result": result}
             else:
                 return result
+        elif function_name == "clear_collected_intro":
+            result = clear_collected_intro(**kwargs)
+            return result
+        elif function_name == "clear_all_user_data":
+            result = clear_all_user_data(**kwargs)
+            return result
         else:
             return {
                 "success": False,

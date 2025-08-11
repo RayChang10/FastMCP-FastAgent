@@ -55,11 +55,33 @@ class InterviewStateManager:
 
     def clear_user_data(self, user_id):
         """清空用戶的所有狀態數據"""
+        print(f"🧹 開始清除用戶 {user_id} 的所有狀態數據...")
+
+        # 清除狀態
         if user_id in self.session_states:
+            old_state = self.session_states[user_id]
             del self.session_states[user_id]
+            print(
+                f"   ✅ 已清除狀態: {old_state.value if hasattr(old_state, 'value') else old_state}"
+            )
+        else:
+            print(f"   ℹ️ 用戶 {user_id} 沒有狀態數據")
+
+        # 清除當前問題
         if user_id in self.user_current_questions:
+            old_question = self.user_current_questions[user_id]
             del self.user_current_questions[user_id]
-        print(f"🧹 用戶 {user_id} 的所有狀態數據已清空")
+            print(
+                f"   ✅ 已清除當前問題: {old_question.get('question', 'N/A')[:50]}..."
+            )
+        else:
+            print(f"   ℹ️ 用戶 {user_id} 沒有當前問題數據")
+
+        # 強制重置為等待狀態
+        self.session_states[user_id] = InterviewState.WAITING
+        print(f"   ✅ 已重置用戶 {user_id} 狀態為: {InterviewState.WAITING.value}")
+
+        print(f"🧹 用戶 {user_id} 的所有狀態數據已完全清空並重置")
 
     def transition_state(self, user_id, user_message):
         """根據用戶訊息判斷是否需要狀態轉換"""

@@ -5,6 +5,7 @@
 from fast_agent_bridge import (
     analyze_answer,
     analyze_intro,
+    clear_all_user_data,
     clear_collected_intro,
     get_collected_intro,
     get_question,
@@ -28,6 +29,17 @@ class InterviewAPI(Resource):
             data = request.get_json()
             user_message = data.get("message", "")
             user_id = data.get("user_id", "default_user")
+
+            # 檢查是否為重置請求
+            if user_message.lower() in [
+                "重新開始",
+                "重新來過",
+                "重新面試",
+                "重來",
+                "restart",
+                "reset",
+            ]:
+                return self._handle_reset_request(user_id)
 
             # 獲取當前狀態
             current_state = self.state_manager.get_user_state(user_id)
@@ -79,6 +91,56 @@ class InterviewAPI(Resource):
             db.session.rollback()
             return create_error_response(f"處理面試對話失敗: {str(e)}", status_code=400)
 
+    def delete(self):
+        """處理面試重置請求"""
+        try:
+            data = request.get_json() or {}
+            user_id = data.get("user_id", "default_user")
+
+            return self._handle_reset_request(user_id)
+
+        except Exception as e:
+            return create_error_response(f"重置面試失敗: {str(e)}", status_code=500)
+
+    def _handle_reset_request(self, user_id):
+        """處理重置請求"""
+        try:
+            # 1. 清除後端狀態管理器的所有數據
+            self.state_manager.clear_user_data(user_id)
+
+            # 2. 清除已收集的自我介紹內容和其他相關數據
+            clear_all_user_data(user_id)
+
+            # 3. 清除資料庫中的面試會話記錄
+            # 修正：正確處理 user_id 類型不匹配問題
+            if str(user_id).isdigit():
+                # 如果 user_id 是數字，直接查詢
+                InterviewSession.query.filter_by(user_id=int(user_id)).delete()
+            else:
+                # 如果 user_id 不是數字（如 "default_user"），清除 user_id 為 None 的記錄
+                InterviewSession.query.filter_by(user_id=None).delete()
+
+            db.session.commit()
+
+            # 4. 清除其他相關的全局狀態（如果有的話）
+            # 這裡可以添加清除其他模組狀態的邏輯
+
+            print(f"🧹 用戶 {user_id} 的所有面試數據已完全清除")
+
+            return create_success_response(
+                data={
+                    "response": "✅ 面試已完全重置！所有對話記錄、狀態和記憶已清空。請點擊「開始面試」按鈕開始全新的面試。",
+                    "session_id": None,
+                    "current_state": "waiting",
+                    "reset_complete": True,
+                }
+            )
+
+        except Exception as e:
+            db.session.rollback()
+            print(f"❌ 重置面試數據失敗: {str(e)}")
+            return create_error_response(f"重置面試數據失敗: {str(e)}", status_code=500)
+
     def _process_message_by_state(self, user_message, current_state, user_id):
         """根據狀態處理訊息"""
         if current_state.value == "waiting":
@@ -107,16 +169,8 @@ class InterviewAPI(Resource):
         ]
 
         if any(keyword in lower_message for keyword in start_keywords):
-            # 重新開始新的面試回合時，清空已收集的自我介紹
-            try:
-                clear_collected_intro("default_user")
-            except Exception:
-                pass
-            # 清空狀態管理器的所有用戶數據，確保全新開始
-            try:
-                self.state_manager.clear_user_data("default_user")
-            except Exception:
-                pass
+            # 移除冗餘的清除調用，避免狀態不一致
+            # 這些清除邏輯已經在 _handle_reset_request 中統一處理
             return """
 🎯 面試開始！
 
@@ -147,8 +201,6 @@ class InterviewAPI(Resource):
 1. 自我介紹 → 2. 介紹分析 → 3. 技術問答 → 4. 總結建議
 
 請點擊「開始面試」按鈕，或輸入「開始面試」來開始您的面試之旅！
-
-您說：「{user_message}」
             """
 
     def _process_intro_state(self, user_message, user_id):
@@ -300,12 +352,8 @@ class InterviewAPI(Resource):
         restart_keywords = ["重新開始", "重新來過", "重新面試", "重來", "restart"]
 
         if any(k in lower_message for k in restart_keywords):
-            # 重新開始時，清空所有狀態和數據
-            try:
-                clear_collected_intro(user_id)
-                self.state_manager.clear_user_data(user_id)
-            except Exception:
-                pass
+            # 移除冗餘的清除調用，避免狀態不一致
+            # 這些清除邏輯已經在 _handle_reset_request 中統一處理
             return "✅ 面試已重置，請點擊「開始面試」按鈕開始新的面試。"
         else:
             return """

@@ -33,12 +33,52 @@ const InterviewManager = {
         this._hasSentFirstQuestion = false;
         this._isGettingNextQuestion = false;
 
+        // 初始化重置相關標記
+        this._forceResetMode = false;
+        this._resetTimestamp = null;
+        // 請求版本，用於忽略重置前的過期回應
+        this._version = 0;
+        // 可清理的第一題計時器
+        this._firstQuestionTimer = null;
+        // 在途請求集合（jQuery jqXHR）
+        this._pendingRequests = new Set();
+
         this.bindEvents();
         this.loadChatHistory();
         this.checkMicrophonePermission();
         this.updateStageDisplay(); // 初始化階段顯示
 
         console.log('✅ InterviewManager 初始化完成');
+    },
+
+    /**
+     * 追蹤在途請求，便於之後中止
+     */
+    _trackRequest: function (jqXHR) {
+        try {
+            this._pendingRequests.add(jqXHR);
+            const remove = () => {
+                try { this._pendingRequests.delete(jqXHR); } catch (e) { }
+            };
+            jqXHR.always(remove);
+        } catch (e) {
+            // 忽略追蹤錯誤
+        }
+        return jqXHR;
+    },
+
+    /**
+     * 中止所有在途請求
+     */
+    _abortAllPendingRequests: function () {
+        try {
+            this._pendingRequests.forEach((req) => {
+                try { req.abort(); } catch (e) { }
+            });
+        } finally {
+            this._pendingRequests.clear();
+        }
+        console.log('🛑 已中止所有在途請求');
     },
 
     /**
@@ -146,14 +186,14 @@ const InterviewManager = {
      */
     sendToMCP: function (message) {
         return new Promise((resolve, reject) => {
-            $.ajax({
+            this._trackRequest($.ajax({
                 url: 'http://localhost:8080/api/chat',
                 type: 'POST',
                 contentType: 'application/json',
                 data: JSON.stringify({ message: message }),
                 timeout: 5000,
                 crossDomain: true
-            }).done((response) => {
+            })).done((response) => {
                 console.log('MCP 回應:', response);
                 resolve(response);
             }).fail((xhr, status, error) => {
@@ -193,8 +233,16 @@ const InterviewManager = {
             };
         }
 
-        API.post('/interview', requestData).done((response) => {
+        // 拍下當前版本，確保只處理相同版本的回應
+        const requestVersion = this._version;
+
+        this._trackRequest(API.post('/interview', requestData)).done((response) => {
             this.hideTypingIndicator();
+            // 忽略過期回應（重置後版本已變）
+            if (requestVersion !== this._version) {
+                console.log('🛑 忽略過期回應 (sendToBackend)');
+                return;
+            }
             if (response && (response.success === true || response.status_code === 200)) {
                 const aiText = (response?.data?.response) || response?.response || '';
                 const serverState = response?.data?.current_state;
@@ -203,7 +251,8 @@ const InterviewManager = {
                 // 同時防止在重新開始後的短時間內被後端狀態覆蓋
                 if (serverState && INTERVIEW_STAGES[serverState] &&
                     currentStage !== 'waiting' &&
-                    !this._isRecentlyReset()) {
+                    !this._isRecentlyReset() &&
+                    !this._isInForceResetMode()) {
                     currentStage = serverState;
                     this.updateStageDisplay();
                 }
@@ -234,6 +283,7 @@ const InterviewManager = {
                     }
 
                     this._autoNextQuestionTimer = setTimeout(() => {
+                        if (requestVersion !== this._version) return; // 重置後不觸發
                         console.log('⏰ 自動獲取下一題計時器觸發');
                         this._autoGetNextQuestion();
                         this._autoNextQuestionTimer = null;
@@ -304,20 +354,29 @@ const InterviewManager = {
         // 禁用輸入框
         $('#messageInput').prop('disabled', true);
 
-        API.post('/interview', {
+        const requestVersion = this._version;
+
+        this._trackRequest(API.post('/interview', {
             message: '請給我問題',
             user_id: currentUserId || 'default_user'
-        }).done((response) => {
+        })).done((response) => {
             // 重新啟用輸入框
             $('#messageInput').prop('disabled', false);
             console.log('✅ 下一題回應:', response);
             this.hideTypingIndicator();
             this._isGettingNextQuestion = false;
 
+            if (requestVersion !== this._version) {
+                console.log('🛑 忽略過期回應 (_sendDirectQuestionRequest)');
+                return;
+            }
+
             if (response && (response.success === true || response.status_code === 200)) {
                 const aiText = (response?.data?.response) || response?.response || '';
                 const serverState = response?.data?.current_state;
-                if (serverState && INTERVIEW_STAGES[serverState]) {
+                if (serverState && INTERVIEW_STAGES[serverState] &&
+                    !this._isRecentlyReset() &&
+                    !this._isInForceResetMode()) {
                     currentStage = serverState;
                     this.updateStageDisplay();
                 }
@@ -578,53 +637,117 @@ const InterviewManager = {
      */
     resetInterview: function () {
         if (confirm('確定要重新開始面試嗎？這將清除所有對話記錄。')) {
-            // 清除所有自動計時器
-            if (this._autoNextQuestionTimer) {
-                clearTimeout(this._autoNextQuestionTimer);
-                this._autoNextQuestionTimer = null;
-            }
+            console.log('🔄 開始重置面試...');
 
-            isInterviewActive = false;
-            currentStage = 'waiting';
+            // 先中止所有在途請求，避免重置後仍有 POST 回來
+            this._abortAllPendingRequests();
 
-            // 完全清空聊天記錄
-            chatHistory = [];
-            $('#chatMessages').empty();
+            // 1. 先向後端發送重置請求
+            this._sendResetRequestToBackend();
 
-            // 使用 Storage 工具類清除瀏覽器本地儲存
-            if (typeof Storage !== 'undefined') {
-                Storage.remove('chatHistory');
-                console.log('🗑️ 已清除瀏覽器本地儲存的聊天記錄');
-            }
+            // 2. 清除前端狀態
+            this._clearFrontendState();
 
-            // 記錄重置時間戳記，防止後端狀態覆蓋
-            Storage.set('lastResetTime', new Date().getTime());
-            console.log('⏰ 記錄重置時間戳記');
+            // 3. 強制設置重置標記，防止後端狀態覆蓋
+            this._forceResetMode = true;
+            this._resetTimestamp = new Date().getTime();
+            // 提升版本：之後收到的舊回應將被忽略
+            this._version += 1;
 
-            // 重置所有標記
-            this._hasSentFirstQuestion = false;
-            this._isGettingNextQuestion = false;
-
-            // 重置按鈕狀態
-            $('#startInterview').prop('disabled', false).html('<i class="fas fa-play me-1"></i>開始面試');
-            $('#pauseInterview').prop('disabled', true);
-
-            // 重置進度條
-            $('#interviewProgress').css('width', '0%');
-            $('#progressText').text('點擊開始面試');
-
-            this.updateStageDisplay();
-
-            // 顯示歡迎訊息
-            this.displayMessage('歡迎使用虛擬面試顧問！我會幫助您進行模擬面試。請點擊「開始面試」開始您的面試之旅。', 'ai');
-
-            // 儲存空的聊天記錄到本地儲存，確保不會載入舊內容
-            this.saveChatHistory();
-
+            // 4. 顯示重置完成訊息
             Utils.showNotification('面試已重新開始', 'info');
-
             console.log('🔄 面試已完全重置，所有狀態和記憶已清空');
         }
+    },
+
+    /**
+     * 向後端發送重置請求
+     */
+    _sendResetRequestToBackend: function () {
+        const resetData = {
+            user_id: currentUserId || 'default_user'
+        };
+
+        $.ajax({
+            url: '/api/interview',
+            method: 'DELETE',
+            contentType: 'application/json',
+            data: JSON.stringify(resetData),
+            success: function (response) {
+                if (response.success && response.data.reset_complete) {
+                    console.log('✅ 後端重置成功');
+                } else {
+                    console.log('⚠️ 後端重置可能不完整');
+                }
+            },
+            error: function (xhr, status, error) {
+                console.error('❌ 後端重置請求失敗:', error);
+                // 即使後端重置失敗，前端仍然會清除本地狀態
+                console.log('⚠️ 前端狀態已清除，但後端重置失敗');
+            }
+        }); // 重置請求不追蹤，避免互相中止
+    },
+
+    /**
+     * 清除前端狀態
+     */
+    _clearFrontendState: function () {
+        console.log('🧹 開始清除前端狀態...');
+
+        // 清除所有自動計時器
+        if (this._autoNextQuestionTimer) {
+            clearTimeout(this._autoNextQuestionTimer);
+            this._autoNextQuestionTimer = null;
+        }
+        if (this._firstQuestionTimer) {
+            clearTimeout(this._firstQuestionTimer);
+            this._firstQuestionTimer = null;
+        }
+
+        // 完全重置面試狀態
+        isInterviewActive = false;
+        currentStage = 'waiting';
+
+        // 完全清空聊天記錄
+        chatHistory = [];
+        $('#chatMessages').empty();
+
+        // 清除瀏覽器本地儲存 - 使用更徹底的清除方式
+        if (typeof localStorage !== 'undefined') {
+            // 清除所有相關的本地存儲項目
+            localStorage.removeItem('chatHistory');
+            localStorage.removeItem('lastResetTime');
+            localStorage.removeItem('userIntroData');
+            localStorage.removeItem('interviewProgress');
+
+            // 設置重置時間戳，用於防止載入舊記錄
+            localStorage.setItem('lastResetTime', new Date().getTime());
+
+            console.log('🗑️ 已清除瀏覽器本地儲存的所有相關數據');
+        }
+
+        // 重置所有標記和狀態
+        this._hasSentFirstQuestion = false;
+        this._isGettingNextQuestion = false;
+
+        // 重置按鈕狀態
+        $('#startInterview').prop('disabled', false).html('<i class="fas fa-play me-1"></i>開始面試');
+        $('#pauseInterview').prop('disabled', true);
+
+        // 重置進度條和顯示
+        $('#interviewProgress').css('width', '0%');
+        $('#progressText').text('點擊開始面試');
+
+        // 強制更新階段顯示
+        this.updateStageDisplay();
+
+        // 顯示歡迎訊息
+        this.displayMessage('歡迎使用虛擬面試顧問！我會幫助您進行模擬面試。請點擊「開始面試」開始您的面試之旅。', 'ai');
+
+        // 儲存空的聊天記錄到本地儲存，確保不會載入舊內容
+        this.saveChatHistory();
+
+        console.log('✅ 前端狀態清除完成');
     },
 
     /**
@@ -638,7 +761,8 @@ const InterviewManager = {
         // 同時防止在重新開始後的短時間內被後端狀態影響
         if (serverState && INTERVIEW_STAGES[serverState] &&
             currentStage !== 'waiting' &&
-            !this._isRecentlyReset()) {
+            !this._isRecentlyReset() &&
+            !this._isInForceResetMode()) {
             if (currentStage !== serverState) {
                 console.log(`🔄 後端狀態更新: ${currentStage} -> ${serverState}`);
                 currentStage = serverState;
@@ -745,24 +869,33 @@ const InterviewManager = {
         // 先顯示提示訊息
         this.displayMessage('5秒後將為您提供第一個面試問題...', 'ai');
 
+        const requestVersion = this._version;
+
         // 等待5秒後再發送實際問題
-        setTimeout(() => {
+        this._firstQuestionTimer = setTimeout(() => {
             // 顯示打字指示器
             this.showTypingIndicator();
 
             // 統一使用 '請給我問題' 格式
-            API.post('/interview', {
+            this._trackRequest(API.post('/interview', {
                 message: '請給我問題',
                 user_id: currentUserId || 'default_user'
-            }).done((response) => {
+            })).done((response) => {
                 console.log('✅ 第一個問題回應:', response);
                 this.hideTypingIndicator();
                 this._isGettingNextQuestion = false; // 重置標記，允許後續自動下一題
 
+                if (requestVersion !== this._version) {
+                    console.log('🛑 忽略過期回應 (sendFirstQuestion)');
+                    return;
+                }
+
                 if (response && (response.success === true || response.status_code === 200)) {
                     const aiText = (response?.data?.response) || response?.response || '';
                     const serverState = response?.data?.current_state;
-                    if (serverState && INTERVIEW_STAGES[serverState]) {
+                    if (serverState && INTERVIEW_STAGES[serverState] &&
+                        !this._isRecentlyReset() &&
+                        !this._isInForceResetMode()) {
                         currentStage = serverState;
                         this.updateStageDisplay();
                     }
@@ -932,10 +1065,31 @@ const InterviewManager = {
      */
     loadChatHistory: function () {
         // 檢查是否有本地儲存的聊天記錄
-        const storedHistory = Storage.get('chatHistory', []);
+        let storedHistory = [];
+        let lastResetTime = 0;
 
-        // 只有在有儲存記錄且不是重新開始狀態時才載入
-        if (storedHistory.length > 0 && currentStage !== 'waiting') {
+        if (typeof localStorage !== 'undefined') {
+            try {
+                const stored = localStorage.getItem('chatHistory');
+                storedHistory = stored ? JSON.parse(stored) : [];
+                lastResetTime = localStorage.getItem('lastResetTime') || 0;
+            } catch (e) {
+                console.error('❌ 載入本地儲存失敗:', e);
+                storedHistory = [];
+                lastResetTime = 0;
+            }
+        }
+
+        const currentTime = new Date().getTime();
+
+        // 檢查是否在重置後的短時間內（10秒內）
+        const isRecentlyReset = (currentTime - lastResetTime) < 10000;
+
+        // 檢查是否處於強制重置模式
+        const isInForceResetMode = this._isInForceResetMode();
+
+        // 只有在有儲存記錄、不是重新開始狀態、且不是剛剛重置時才載入
+        if (storedHistory.length > 0 && currentStage !== 'waiting' && !isRecentlyReset && !isInForceResetMode) {
             chatHistory = storedHistory;
             chatHistory.forEach(chat => {
                 this.displayMessage(chat.user, 'user');
@@ -943,9 +1097,15 @@ const InterviewManager = {
             });
             console.log(`📚 載入了 ${chatHistory.length} 條聊天記錄`);
         } else {
-            // 如果是重新開始狀態或沒有儲存記錄，保持空陣列
+            // 如果是重新開始狀態、沒有儲存記錄、或剛剛重置，保持空陣列
             chatHistory = [];
-            console.log('🆕 沒有載入聊天記錄，保持乾淨狀態');
+            if (isRecentlyReset) {
+                console.log('🆕 剛剛重置過，不載入聊天記錄');
+            } else if (isInForceResetMode) {
+                console.log('🛡️ 處於強制重置模式，不載入聊天記錄');
+            } else {
+                console.log('🆕 沒有載入聊天記錄，保持乾淨狀態');
+            }
         }
     },
 
@@ -953,7 +1113,9 @@ const InterviewManager = {
      * 儲存聊天記錄
      */
     saveChatHistory: function () {
-        Storage.set('chatHistory', chatHistory);
+        if (typeof localStorage !== 'undefined') {
+            localStorage.setItem('chatHistory', JSON.stringify(chatHistory));
+        }
     },
 
     /**
@@ -1000,13 +1162,38 @@ const InterviewManager = {
      * 檢查是否剛剛重置過面試
      */
     _isRecentlyReset: function () {
-        const lastResetTime = Storage.get('lastResetTime', 0);
-        const currentTime = new Date().getTime();
-        const resetDuration = 3000; // 3秒內不允許重置
+        if (typeof localStorage !== 'undefined') {
+            const lastResetTime = localStorage.getItem('lastResetTime') || 0;
+            const currentTime = new Date().getTime();
+            const resetDuration = 10000; // 增加到10秒內不允許重置
 
-        if (currentTime - lastResetTime < resetDuration) {
-            console.log('⚠️ 面試剛剛重置，防止後端狀態覆蓋');
-            return true;
+            if (currentTime - lastResetTime < resetDuration) {
+                console.log('⚠️ 面試剛剛重置，防止後端狀態覆蓋');
+                return true;
+            }
+        }
+        return false;
+    },
+
+    /**
+     * 檢查是否處於強制重置模式
+     */
+    _isInForceResetMode: function () {
+        // 檢查是否在強制重置模式中
+        if (this._forceResetMode) {
+            const currentTime = new Date().getTime();
+            const resetDuration = 30000; // 30秒內保持強制重置模式
+
+            if (currentTime - this._resetTimestamp < resetDuration) {
+                console.log('🛡️ 處於強制重置模式，防止後端狀態覆蓋');
+                return true;
+            } else {
+                // 超過30秒，退出強制重置模式
+                this._forceResetMode = false;
+                this._resetTimestamp = null;
+                console.log('🔄 強制重置模式已結束');
+                return false;
+            }
         }
         return false;
     }
@@ -1040,12 +1227,33 @@ $(document).ready(function () {
 
     // 檢查是否需要顯示歡迎訊息
     // 只有在沒有聊天記錄且不是從儲存載入的情況下才顯示
-    const storedHistory = Storage.get('chatHistory', []);
-    if (storedHistory.length === 0 && chatHistory.length === 0) {
+    let storedHistory = [];
+    let lastResetTime = 0;
+
+    if (typeof localStorage !== 'undefined') {
+        try {
+            const stored = localStorage.getItem('chatHistory');
+            storedHistory = stored ? JSON.parse(stored) : [];
+            lastResetTime = localStorage.getItem('lastResetTime') || 0;
+        } catch (e) {
+            console.error('❌ 載入本地儲存失敗:', e);
+            storedHistory = [];
+            lastResetTime = 0;
+        }
+    }
+
+    const currentTime = new Date().getTime();
+    const isRecentlyReset = (currentTime - lastResetTime) < 10000;
+
+    if ((storedHistory.length === 0 && chatHistory.length === 0) || isRecentlyReset) {
         setTimeout(() => {
             InterviewManager.displayMessage('歡迎使用虛擬面試顧問！我會幫助您進行模擬面試。請點擊「開始面試」開始您的面試之旅。', 'ai');
         }, 500);
-        console.log('👋 顯示初始歡迎訊息');
+        if (isRecentlyReset) {
+            console.log('🔄 剛剛重置過，顯示歡迎訊息');
+        } else {
+            console.log('👋 顯示初始歡迎訊息');
+        }
     } else {
         console.log('📚 已有聊天記錄，跳過初始歡迎訊息');
     }

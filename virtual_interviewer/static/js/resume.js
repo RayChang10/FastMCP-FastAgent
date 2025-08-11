@@ -11,38 +11,38 @@ const ResumeManager = {
     /**
      * 初始化履歷表單
      */
-    init: function() {
+    init: function () {
         this.bindEvents();
         this.loadDraftData();
         this.addSkill(); // 預設添加一個技能
         this.addExperience(); // 預設添加一個工作經驗
     },
-    
+
     /**
      * 綁定事件監聽器
      */
-    bindEvents: function() {
+    bindEvents: function () {
         // 表單提交
         $('#resumeForm').on('submit', (e) => {
             e.preventDefault();
             this.submitResume();
         });
-        
+
         // 儲存草稿
         $('#saveAsDraft').on('click', () => {
             this.saveAsDraft();
         });
-        
+
         // 監聽表單變化以自動儲存草稿
         $('#resumeForm').on('input change', () => {
             this.autoSaveDraft();
         });
     },
-    
+
     /**
      * 添加關鍵字輸入欄位
      */
-    addKeyword: function() {
+    addKeyword: function () {
         keywordCount++;
         const keywordHtml = `
             <div class="d-flex align-items-center mb-2" id="keyword_${keywordCount}">
@@ -57,18 +57,18 @@ const ResumeManager = {
         `;
         $('#keywordsContainer').append(keywordHtml);
     },
-    
+
     /**
      * 移除關鍵字輸入欄位
      */
-    removeKeyword: function(id) {
+    removeKeyword: function (id) {
         $(`#keyword_${id}`).remove();
     },
-    
+
     /**
      * 添加技能輸入欄位
      */
-    addSkill: function() {
+    addSkill: function () {
         skillCount++;
         const skillHtml = `
             <div class="experience-card p-4 mb-4" id="skill_${skillCount}">
@@ -96,25 +96,25 @@ const ResumeManager = {
                 </div>
             </div>
         `;
-        
+
         $('#skillsContainer').append(skillHtml);
     },
-    
+
     /**
      * 移除技能輸入欄位
      */
-    removeSkill: function(id) {
+    removeSkill: function (id) {
         if (confirm('確定要刪除這個技能嗎？')) {
-            $(`#skill_${id}`).fadeOut(300, function() {
+            $(`#skill_${id}`).fadeOut(300, function () {
                 $(this).remove();
             });
         }
     },
-    
+
     /**
      * 添加工作經驗
      */
-    addExperience: function() {
+    addExperience: function () {
         experienceCount++;
         const experienceHtml = `
             <div class="experience-card p-4 mb-4" id="experience_${experienceCount}">
@@ -270,25 +270,25 @@ const ResumeManager = {
                 </div>
             </div>
         `;
-        
+
         $('#experiencesContainer').append(experienceHtml);
     },
-    
+
     /**
      * 移除工作經驗
      */
-    removeExperience: function(id) {
+    removeExperience: function (id) {
         if (confirm('確定要刪除這個工作經驗嗎？')) {
-            $(`#experience_${id}`).fadeOut(300, function() {
+            $(`#experience_${id}`).fadeOut(300, function () {
                 $(this).remove();
             });
         }
     },
-    
+
     /**
      * 切換結束日期輸入
      */
-    toggleEndDate: function(id, checkbox) {
+    toggleEndDate: function (id, checkbox) {
         const endDateInput = $(`input[name="experiences[${id}][end_date]"]`);
         if (checkbox.checked) {
             endDateInput.prop('disabled', true).val('');
@@ -296,15 +296,15 @@ const ResumeManager = {
             endDateInput.prop('disabled', false);
         }
     },
-    
+
     /**
      * 提交履歷
      */
-    submitResume: function() {
+    submitResume: function () {
         Utils.showLoading('button[type="submit"]', '建立中...');
-        
+
         const formData = this.collectFormData();
-        
+
         // 驗證表單
         const errors = this.validateFormData(formData);
         if (errors.length > 0) {
@@ -312,21 +312,25 @@ const ResumeManager = {
             Utils.showNotification('請檢查以下錯誤：<br>' + errors.join('<br>'), 'danger', 5000);
             return;
         }
-        
+
         // 提交到後端
         API.post('/users', formData)
             .done((response) => {
                 Utils.hideLoading('button[type="submit"]');
                 if (response.success) {
                     // 清除草稿
-                    Storage.remove('resumeDraft');
-                    
+                    if (typeof localStorage !== 'undefined') {
+                        localStorage.removeItem('resumeDraft');
+                    }
+
                     // 顯示成功訊息
                     $('#successModal').modal('show');
-                    
+
                     // 儲存用戶ID到本地儲存
-                    Storage.set('currentUserId', response.user_id);
-                    
+                    if (typeof localStorage !== 'undefined') {
+                        localStorage.setItem('currentUserId', response.user_id);
+                    }
+
                     Utils.showNotification('履歷建立成功！', 'success');
                 }
             })
@@ -334,11 +338,11 @@ const ResumeManager = {
                 Utils.hideLoading('button[type="submit"]');
             });
     },
-    
+
     /**
      * 收集表單資料
      */
-    collectFormData: function() {
+    collectFormData: function () {
         const formData = {
             name: $('#name').val(),
             desired_position: $('#desired_position').val(),
@@ -349,68 +353,68 @@ const ResumeManager = {
             skills: [],
             work_experiences: []
         };
-        
+
         // 收集關鍵字
-        $('input[name="keywords[]"]').each(function() {
+        $('input[name="keywords[]"]').each(function () {
             const value = $(this).val().trim();
             if (value) {
                 formData.keywords.push(value);
             }
         });
         formData.keywords = formData.keywords.join(', ');
-        
+
         // 收集技能
-        $('.experience-card[id^="skill_"]').each(function() {
+        $('.experience-card[id^="skill_"]').each(function () {
             const skillData = {};
-            $(this).find('input, textarea').each(function() {
+            $(this).find('input, textarea').each(function () {
                 const name = $(this).attr('name');
                 if (name && name.includes('[')) {
                     const fieldName = name.match(/\[([^\]]+)\]$/)[1];
                     skillData[fieldName] = $(this).val();
                 }
             });
-            
+
             if (skillData.skill_name) {
                 formData.skills.push(skillData);
             }
         });
-        
+
         // 收集工作經驗
-        $('.experience-card').each(function() {
+        $('.experience-card').each(function () {
             const experienceData = {};
-            $(this).find('input, select, textarea').each(function() {
+            $(this).find('input, select, textarea').each(function () {
                 const name = $(this).attr('name');
                 if (name && name.includes('[')) {
                     const fieldName = name.match(/\[([^\]]+)\]$/)[1];
                     experienceData[fieldName] = $(this).val();
                 }
             });
-            
+
             // 如果是目前任職中，清空結束日期
             const isCurrentCheckbox = $(this).find('input[type="checkbox"]');
             if (isCurrentCheckbox.is(':checked')) {
                 experienceData.end_date = null;
             }
-            
+
             if (experienceData.company_name) {
                 formData.work_experiences.push(experienceData);
             }
         });
-        
+
         return formData;
     },
-    
+
     /**
      * 驗證表單資料
      */
-    validateFormData: function(formData) {
+    validateFormData: function (formData) {
         const errors = [];
-        
+
         if (!formData.name) errors.push('姓名為必填欄位');
         if (!formData.desired_position) errors.push('期望職稱為必填欄位');
         if (!formData.desired_field) errors.push('期望工作領域為必填欄位');
         if (!formData.desired_location) errors.push('期望工作地點為必填欄位');
-        
+
         // 驗證技能
         if (formData.skills.length === 0) {
             errors.push('至少需要填寫一項專業技能');
@@ -421,7 +425,7 @@ const ResumeManager = {
                 }
             });
         }
-        
+
         // 驗證工作經驗
         if (formData.work_experiences.length === 0) {
             errors.push('至少需要填寫一個工作經驗');
@@ -435,47 +439,51 @@ const ResumeManager = {
                 }
             });
         }
-        
+
         return errors;
     },
-    
+
     /**
      * 儲存草稿
      */
-    saveAsDraft: function() {
+    saveAsDraft: function () {
         const formData = this.collectFormData();
-        Storage.set('resumeDraft', formData);
+        if (typeof localStorage !== 'undefined') {
+            localStorage.setItem('resumeDraft', JSON.stringify(formData));
+        }
         Utils.showNotification('草稿已儲存', 'success', 2000);
     },
-    
+
     /**
      * 自動儲存草稿
      */
-    autoSaveDraft: function() {
+    autoSaveDraft: function () {
         // 節流函數，避免頻繁儲存
         clearTimeout(this.autoSaveTimer);
         this.autoSaveTimer = setTimeout(() => {
             this.saveAsDraft();
         }, 5000);
     },
-    
+
     /**
      * 載入草稿資料
      */
-    loadDraftData: function() {
-        const draftData = Storage.get('resumeDraft');
+    loadDraftData: function () {
+        const draftData = typeof localStorage !== 'undefined' ? localStorage.getItem('resumeDraft') : null;
         if (!draftData) return;
-        
+
+        const parsedDraftData = JSON.parse(draftData);
+
         // 載入基本資料
-        $('#name').val(draftData.name || '');
-        $('#desired_position').val(draftData.desired_position || '');
-        $('#desired_field').val(draftData.desired_field || '');
-        $('#desired_location').val(draftData.desired_location || '');
-        $('#introduction').val(draftData.introduction || '');
-        
+        $('#name').val(parsedDraftData.name || '');
+        $('#desired_position').val(parsedDraftData.desired_position || '');
+        $('#desired_field').val(parsedDraftData.desired_field || '');
+        $('#desired_location').val(parsedDraftData.desired_location || '');
+        $('#introduction').val(parsedDraftData.introduction || '');
+
         // 載入關鍵字
-        if (draftData.keywords) {
-            const keywords = draftData.keywords.split(', ');
+        if (parsedDraftData.keywords) {
+            const keywords = parsedDraftData.keywords.split(', ');
             keywords.forEach((keyword, index) => {
                 if (index === 0) {
                     $('input[name="keywords[]"]').first().val(keyword);
@@ -485,20 +493,20 @@ const ResumeManager = {
                 }
             });
         }
-        
+
         // 載入技能
-        if (draftData.skills && draftData.skills.length > 0) {
+        if (parsedDraftData.skills && parsedDraftData.skills.length > 0) {
             // 清除預設的技能欄位
             $('#skillsContainer').empty();
             skillCount = 0;
-            
-            draftData.skills.forEach((skill) => {
+
+            parsedDraftData.skills.forEach((skill) => {
                 this.addSkill();
                 $(`input[name="skills[${skillCount}][skill_name]"]`).val(skill.skill_name || '');
                 $(`textarea[name="skills[${skillCount}][skill_description]"]`).val(skill.skill_description || '');
             });
         }
-        
+
         Utils.showNotification('已載入草稿資料', 'info', 2000);
     }
 };
@@ -537,6 +545,6 @@ function saveAsDraft() {
 }
 
 // 當文檔就緒時初始化
-$(document).ready(function() {
+$(document).ready(function () {
     ResumeManager.init();
 }); 
