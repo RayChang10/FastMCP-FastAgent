@@ -166,12 +166,10 @@ def get_question():
 _user_intro_content = {}
 
 
-def intro_collector(user_message: str = ""):
+def intro_collector(user_message: str = "", user_id: str = "default_user"):
     """收集用戶自我介紹內容"""
     try:
-        print(f"📝 收集自我介紹內容: {user_message}")
-
-        user_id = "default_user"  # 可以根據需要調整
+        print(f"📝 收集自我介紹內容: {user_message} (用戶: {user_id})")
 
         # 如果是第一次收集，初始化
         if user_id not in _user_intro_content:
@@ -427,10 +425,10 @@ def start_interview():
         return f"MCP 工具錯誤：{str(e)}"
 
 
-def analyze_intro(user_message: str = ""):
+def analyze_intro(user_message: str = "", user_id: str = "default_user"):
     """分析用戶自我介紹 - 使用 LLM 進行智能分析"""
     try:
-        print(f"📊 分析自我介紹內容: {user_message}")
+        print(f"📊 分析自我介紹內容: {user_message} (用戶: {user_id})")
 
         # 優先使用 LLM 分析
         try:
