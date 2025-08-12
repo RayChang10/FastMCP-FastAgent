@@ -43,6 +43,10 @@ const InterviewManager = {
         // 在途請求集合（jQuery jqXHR）
         this._pendingRequests = new Set();
 
+        // 面試計時（僅統計用，暫停鍵僅影響此計時與自動計時器）
+        this._interviewElapsedMs = 0; // 已經累積的毫秒
+        this._interviewTimerInterval = null; // setInterval 句柄
+
         this.bindEvents();
         this.loadChatHistory();
         this.checkMicrophonePermission();
@@ -237,6 +241,11 @@ const InterviewManager = {
         const requestVersion = this._version;
 
         this._trackRequest(API.post('/interview', requestData)).done((response) => {
+            // 若目前為暫停狀態，忽略回應以避免題目被更換
+            if (!isInterviewActive) {
+                console.log('⏸️ 暫停中：忽略後端回應 (sendToBackend)');
+                return;
+            }
             this.hideTypingIndicator();
             // 忽略過期回應（重置後版本已變）
             if (requestVersion !== this._version) {
@@ -250,7 +259,8 @@ const InterviewManager = {
                 // 防止在等待開始階段被後端狀態覆蓋
                 // 同時防止在重新開始後的短時間內被後端狀態覆蓋
                 if (serverState && INTERVIEW_STAGES[serverState] &&
-                    currentStage !== 'waiting' &&
+                    // 允許從 waiting 直接前進到後端告知的進行中狀態，避免卡住
+                    (currentStage !== 'waiting' || ['intro', 'intro_analysis', 'questioning'].includes(serverState)) &&
                     !this._isRecentlyReset() &&
                     !this._isInForceResetMode()) {
                     currentStage = serverState;
@@ -261,6 +271,16 @@ const InterviewManager = {
 
                 // 檢測並更新面試階段（若提供 serverState，優先使用，不再用關鍵字推斷）
                 this.detectStageChange(aiText, serverState);
+
+                // 再保險一次：若後端已進入面試提問階段但尚未發送第一題，這裡也安排一次
+                try {
+                    const lowerText = String(aiText || '').toLowerCase();
+                    const analysisDone = lowerText.includes('分析完成') || lowerText.includes('將進入面試階段') || lowerText.includes('5 秒後提供第一個問題') || lowerText.includes('5秒後提供第一個問題');
+                    if ((serverState === 'questioning' || analysisDone) && !this._hasSentFirstQuestion) {
+                        console.log('🧷 再保險：安排自動發送第一個問題');
+                        setTimeout(() => this.sendFirstQuestion(), 1000);
+                    }
+                } catch (e) { /* 忽略 */ }
 
                 // 儲存對話記錄
                 chatHistory.push({
@@ -360,6 +380,11 @@ const InterviewManager = {
             message: '請給我問題',
             user_id: currentUserId || 'default_user'
         })).done((response) => {
+            // 若目前為暫停狀態，忽略回應以避免題目被更換
+            if (!isInterviewActive) {
+                console.log('⏸️ 暫停中：忽略後端回應 (_sendDirectQuestionRequest)');
+                return;
+            }
             // 重新啟用輸入框
             $('#messageInput').prop('disabled', false);
             console.log('✅ 下一題回應:', response);
@@ -375,6 +400,8 @@ const InterviewManager = {
                 const aiText = (response?.data?.response) || response?.response || '';
                 const serverState = response?.data?.current_state;
                 if (serverState && INTERVIEW_STAGES[serverState] &&
+                    // 允許從 waiting 直接前進到後端告知的進行中狀態，避免卡住
+                    (currentStage !== 'waiting' || ['intro', 'intro_analysis', 'questioning'].includes(serverState)) &&
                     !this._isRecentlyReset() &&
                     !this._isInForceResetMode()) {
                     currentStage = serverState;
@@ -531,6 +558,43 @@ const InterviewManager = {
     },
 
     /**
+     * 啟動面試計時（每秒累積）
+     */
+    _startInterviewTimer: function () {
+        if (this._interviewTimerInterval) return;
+        let lastTick = Date.now();
+        this._interviewTimerInterval = setInterval(() => {
+            const now = Date.now();
+            this._interviewElapsedMs += (now - lastTick);
+            lastTick = now;
+            this._renderInterviewTimer();
+        }, 1000);
+    },
+
+    /**
+     * 停止面試計時
+     */
+    _stopInterviewTimer: function () {
+        if (this._interviewTimerInterval) {
+            clearInterval(this._interviewTimerInterval);
+            this._interviewTimerInterval = null;
+        }
+    },
+
+    /**
+     * 渲染面試計時到 UI
+     */
+    _renderInterviewTimer: function () {
+        const el = document.getElementById('interviewTimer');
+        if (!el) return;
+        const totalSeconds = Math.floor(this._interviewElapsedMs / 1000);
+        const hours = String(Math.floor(totalSeconds / 3600)).padStart(2, '0');
+        const minutes = String(Math.floor((totalSeconds % 3600) / 60)).padStart(2, '0');
+        const seconds = String(totalSeconds % 60).padStart(2, '0');
+        el.textContent = `${hours}:${minutes}:${seconds}`;
+    },
+
+    /**
      * 開始面試
      */
     startInterview: function () {
@@ -538,6 +602,29 @@ const InterviewManager = {
 
         if (isInterviewActive) {
             console.log('面試已經在進行中，跳過');
+            return;
+        }
+
+        // 若當前為暫停狀態（非 waiting/非 completed），則執行「繼續面試」而非重置
+        if (['intro', 'intro_analysis', 'questioning'].includes(currentStage)) {
+            console.log('⏯️ 偵測到暫停後的繼續，恢復至中斷點');
+            isInterviewActive = true;
+
+            // 恢復按鈕狀態
+            $('#startInterview').prop('disabled', true).html('<i class="fas fa-spinner fa-spin me-1"></i>面試中...');
+            $('#pauseInterview').prop('disabled', false);
+
+            // 僅更新顯示，不改變 currentStage、不發送「開始面試」到後端
+            this.updateStageDisplay();
+
+            // 繼續時間計時
+            this._startInterviewTimer();
+
+            if (typeof Utils !== 'undefined' && Utils.showNotification) {
+                Utils.showNotification('已繼續面試', 'info');
+            } else {
+                console.log('✅ 已繼續面試');
+            }
             return;
         }
 
@@ -573,6 +660,9 @@ const InterviewManager = {
         } else {
             console.log('✅ 面試已開始，祝您順利！');
         }
+
+        // 開始時間計時
+        this._startInterviewTimer();
 
         console.log('面試開始邏輯執行完成');
     },
@@ -626,6 +716,19 @@ const InterviewManager = {
             isInterviewActive = false;
             $('#startInterview').prop('disabled', false).html('<i class="fas fa-play me-1"></i>繼續面試');
             $('#pauseInterview').prop('disabled', true);
+
+            // 清除所有自動計時器，避免暫停期間仍自動出題或自動下一題
+            if (this._autoNextQuestionTimer) {
+                clearTimeout(this._autoNextQuestionTimer);
+                this._autoNextQuestionTimer = null;
+            }
+            if (this._firstQuestionTimer) {
+                clearTimeout(this._firstQuestionTimer);
+                this._firstQuestionTimer = null;
+            }
+
+            // 停止計時器（僅時間暫停，不影響在途請求）
+            this._stopInterviewTimer();
 
             this.displayMessage('面試已暫停。點擊「繼續面試」可以繼續。', 'ai');
             Utils.showNotification('面試已暫停', 'warning');
@@ -734,6 +837,11 @@ const InterviewManager = {
         $('#startInterview').prop('disabled', false).html('<i class="fas fa-play me-1"></i>開始面試');
         $('#pauseInterview').prop('disabled', true);
 
+        // 重置計時器
+        this._stopInterviewTimer();
+        this._interviewElapsedMs = 0;
+        this._renderInterviewTimer();
+
         // 重置進度條和顯示
         $('#interviewProgress').css('width', '0%');
         $('#progressText').text('點擊開始面試');
@@ -768,10 +876,52 @@ const InterviewManager = {
                 currentStage = serverState;
                 this.updateStageDisplay();
             }
+            // 若為進入或處於進行中狀態，確保計時器啟動
+            if (['intro', 'intro_analysis', 'questioning'].includes(serverState)) {
+                this._startInterviewTimer();
+            }
+            // 若後端直接回傳已完成，立即更新按鈕與進度
+            if (serverState === 'completed') {
+                isInterviewActive = false;
+                $('#startInterview').prop('disabled', false).html('<i class="fas fa-play me-1"></i>重新開始');
+                $('#pauseInterview').prop('disabled', true);
+                $('#interviewProgress').css('width', '100%');
+                $('#progressText').text('面試完成 (100%)');
+                this._stopInterviewTimer();
+                return;
+            }
+            // 兼容：有些情況後端 current_state 仍為 intro_analysis，但訊息已提示分析完成
+            try {
+                const lowerText = String(aiResponse || '').toLowerCase();
+                const analysisDone = lowerText.includes('分析完成') || lowerText.includes('將進入面試階段') || lowerText.includes('5 秒後提供第一個問題') || lowerText.includes('5秒後提供第一個問題');
+                if ((serverState === 'questioning' || (serverState === 'intro_analysis' && analysisDone)) && !this._hasSentFirstQuestion) {
+                    console.log('🎯 觸發第一題：後端狀態或文案顯示分析完成');
+                    setTimeout(() => {
+                        console.log('⏰ 自動發送第一個問題');
+                        this.sendFirstQuestion();
+                    }, 1000);
+                }
+            } catch (e) { /* 忽略 */ }
             return;
         }
 
         const response = aiResponse.toLowerCase();
+
+        // 保底：若文案已明確表示分析完成並將在5秒後出題，即使當前狀態異常（如仍為 waiting），也安排發送第一題
+        try {
+            const analysisDoneText = (
+                response.includes('分析完成') ||
+                response.includes('將進入面試階段') ||
+                response.includes('5 秒後提供第一個問題') ||
+                response.includes('5秒後提供第一個問題')
+            );
+            if (analysisDoneText && !this._hasSentFirstQuestion) {
+                console.log('🛟 保底機制：偵測到分析完成文案，安排發送第一題');
+                setTimeout(() => {
+                    this.sendFirstQuestion();
+                }, 1000);
+            }
+        } catch (e) { /* 忽略 */ }
 
         // 檢測面試重置狀態
         if (response.includes('面試已重置') || response.includes('請點擊「開始面試」')) {
@@ -826,6 +976,16 @@ const InterviewManager = {
                     console.log('⏰ 分析完成，發送第一個問題');
                     this.sendFirstQuestion();
                 }, 1000); // 只等待1秒讓用戶看到階段轉換
+
+                // 7 秒保底：若仍未看到題目，直接觸發一次請題請求
+                setTimeout(() => {
+                    try {
+                        if (!this._hasQuestionDisplayedRecently()) {
+                            console.log('🛟 保底：尚未檢測到題目，直接請求下一題');
+                            this._autoGetNextQuestion();
+                        }
+                    } catch (e) { /* 忽略 */ }
+                }, 7000);
             } else {
                 console.log('⚠️ 已經發送過第一個問題，跳過');
             }
@@ -921,6 +1081,22 @@ const InterviewManager = {
                 this.displayMessage('抱歉，無法連接到服務。請檢查網路連接或稍後再試。', 'ai');
             });
         }, 5000);
+    },
+
+    /**
+     * 近距離檢測是否已顯示過題目
+     */
+    _hasQuestionDisplayedRecently: function () {
+        try {
+            const recent = chatHistory.slice(-6); // 檢查最近 6 則
+            return recent.some(item => {
+                if (!item || !item.ai) return false;
+                const text = String(item.ai);
+                return text.includes('🎯 面試問題') || text.includes('問題：') || text.includes('請作答');
+            });
+        } catch (e) {
+            return false;
+        }
     },
 
     /**
